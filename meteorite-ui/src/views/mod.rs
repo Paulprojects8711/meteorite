@@ -16,7 +16,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use super::{CLIENT, LoginStage, auth, components};
+use super::{CLIENT, LoginStage, account, components};
 
 pub mod error;
 pub mod loading;
