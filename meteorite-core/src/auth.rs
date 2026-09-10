@@ -94,10 +94,10 @@ struct AccountCreationGuard {
     users_path: PathBuf,
 
     sqlite_path: PathBuf,
-    encrypted_path: PathBuf,
+    secure_path: PathBuf,
 
     users_tmp_path: PathBuf,
-    encrypted_tmp_path: PathBuf,
+    secure_tmp_path: PathBuf,
     backup_tmp_path: PathBuf,
 
     keyring_entry: Entry,
@@ -114,7 +114,7 @@ impl AccountCreationGuard {
 
 impl Drop for AccountCreationGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.encrypted_tmp_path);
+        let _ = fs::remove_file(&self.secure_tmp_path);
         let _ = fs::remove_file(&self.users_tmp_path);
         let _ = fs::remove_file(&self.backup_tmp_path);
 
@@ -122,7 +122,7 @@ impl Drop for AccountCreationGuard {
             return;
         }
 
-        let _ = fs::remove_file(&self.encrypted_path);
+        let _ = fs::remove_file(&self.secure_path);
         let _ = fs::remove_dir_all(&self.sqlite_path);
 
         if self.backup_created {
@@ -392,7 +392,7 @@ pub async fn login_username(
     );
 
     tokio::task::spawn_blocking(move || {
-        save_account(&id, response.user_id, &secure_data, &encryption_passphrase)
+        save_new_account(&id, response.user_id, &secure_data, &encryption_passphrase)
     })
     .await??;
 
@@ -453,7 +453,7 @@ pub async fn login_sso(
     );
 
     tokio::task::spawn_blocking(move || {
-        save_account(&id, response.user_id, &secure_data, &encryption_passphrase)
+        save_new_account(&id, response.user_id, &secure_data, &encryption_passphrase)
     })
     .await??;
 
@@ -733,7 +733,7 @@ fn generate_account_credentials() -> (String, String) {
     (id, encryption_passphrase)
 }
 
-fn save_account(
+fn save_new_account(
     id: &str,
     user_id: OwnedUserId,
     secure_data: &SecureAccountData,
@@ -744,7 +744,7 @@ fn save_account(
 
     let backup_path = account_path.join("users.toml.backup");
     let users_path = account_path.join("users.toml");
-    let encrypted_path = account_path.join(format!("{id}.enc"));
+    let secure_path = account_path.join(format!("{id}.enc"));
     let sqlite_path = account_path.join(id);
 
     // secure_data struct -> toml
@@ -767,10 +767,10 @@ fn save_account(
         users_path: users_path.clone(),
 
         sqlite_path: sqlite_path.clone(),
-        encrypted_path: encrypted_path.clone(),
+        secure_path: secure_path.clone(),
 
         users_tmp_path: users_path.with_extension("tmp").clone(),
-        encrypted_tmp_path: encrypted_path.with_extension("tmp").clone(),
+        secure_tmp_path: secure_path.with_extension("tmp").clone(),
 
         keyring_entry: encryption_passphrase_entry,
         keyring_created: false,
@@ -805,7 +805,7 @@ fn save_account(
     let toml_account_data = toml::to_string(&accounts)?;
 
     // write bytes to encrypted file
-    atomic_write(&encrypted_path, &encrypted_bytes)?;
+    atomic_write(&secure_path, &encrypted_bytes)?;
 
     // write unencrypted file
     atomic_write(&users_path, toml_account_data)?;
