@@ -15,8 +15,7 @@
 - [ ] GUI
 - [ ] GIF Search
 - [ ] Write documentation
-- [x] Handle refreshing of access token
-- [x] Handle soft_logout
+- [ ] hook up handle_refresh_token function to ui/somewhere else
 - [ ] Code-sign application for Apple (IMPORTANT) and Windows
 - [ ] Translations (weblate)
 - [ ] proper-er error handling for loading screen login
