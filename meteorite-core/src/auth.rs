@@ -633,6 +633,53 @@ fn update_account_config(
 
     Ok(())
 }
+
+pub fn remove_account_config(user_id: &str) {
+    let account_path = utils::unwrap_lock(&ACCOUNT_PATH);
+    let users_path = account_path.join("users.toml");
+
+    let Ok(mut accounts) = load_account_list(&users_path) else {
+        return;
+    };
+
+    let Some(account) = accounts
+        .accounts
+        .iter()
+        .find(|account| account.user_id == user_id)
+    else {
+        return;
+    };
+
+    let account_id = account.id.clone();
+
+    let dir_path = account_path.join(&account_id);
+
+    if !dir_path.exists() {
+        return;
+    }
+
+    let enc_path = account_path.join(format!("{}.enc", account_id));
+
+    if !enc_path.exists() {
+        return;
+    }
+
+    let Ok(entry) = Entry::new(APP_NAME, &account_id) else {
+        return;
+    };
+
+    fs::remove_dir_all(dir_path).ok();
+    fs::remove_file(enc_path).ok();
+    entry.delete_credential().ok();
+    accounts.accounts.retain(|a| a.id != account_id);
+
+    let Ok(toml_account_data) = toml::to_string(&accounts) else {
+        return;
+    };
+
+    fs::write(&users_path, toml_account_data).ok();
+}
+
 fn atomic_write<C: AsRef<[u8]>>(target: &Path, contents: C) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::write(&tmp, contents)?;
