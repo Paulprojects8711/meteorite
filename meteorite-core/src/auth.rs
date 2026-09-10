@@ -337,11 +337,10 @@ pub async fn login() -> anyhow::Result<Option<Client>> {
 
     // restore session from the unified account struct
     client
-        .matrix_auth()
-        .restore_session(
-            matrix_session_from_account(account_data, &secure_account_data),
-            RoomLoadSettings::default(),
-        )
+        .restore_session(matrix_session_from_account(
+            account_data,
+            &secure_account_data,
+        ))
         .await?;
 
     Ok(Some(client))
