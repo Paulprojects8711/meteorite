@@ -16,7 +16,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use super::{CLIENT, auth, components, login};
+use super::{CLIENT, account, components, login};
 use dioxus::prelude::*;
 
 #[component]
@@ -30,7 +30,7 @@ pub fn LoadingScreen() -> Element {
         let _ = retry();
 
         async move {
-            let handle = tokio::spawn(async move { auth::login().await });
+            let handle = tokio::spawn(async move { account::login().await });
 
             match handle.await {
                 Ok(Ok(Some(client))) => {
