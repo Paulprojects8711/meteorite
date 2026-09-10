@@ -20,8 +20,11 @@ use crate::{ACCOUNT_PATH, APP_NAME, INITIAL_DEVICE_NAME, utils};
 use age::secrecy::SecretString;
 use keyring_core::Entry;
 use matrix_sdk::{
-    Client, RefreshTokenError, SessionChange, SessionMeta, SessionTokens,
-    authentication::{matrix::MatrixSession, oauth::ClientId},
+    AuthSession, Client, RefreshTokenError, SessionChange, SessionMeta, SessionTokens,
+    authentication::{
+        matrix::MatrixSession,
+        oauth::{ClientId, OAuthSession, UserSession},
+    },
     ruma::{
         OwnedDeviceId, OwnedUserId,
         api::{
@@ -48,6 +51,12 @@ use tokio::sync::mpsc;
 #[derive(Default, Deserialize, Serialize, Clone)]
 struct AccountList {
     accounts: Vec<AccountData>,
+}
+
+// used for restoring sessions
+struct Account {
+    data: AccountData,
+    secure_data: SecureAccountData,
 }
 
 // stored in unencrypted file, lets the client decide which data to load
@@ -337,10 +346,10 @@ pub async fn login() -> anyhow::Result<Option<Client>> {
 
     // restore session from the unified account struct
     client
-        .restore_session(matrix_session_from_account(
-            account_data,
-            &secure_account_data,
-        ))
+        .restore_session(Account {
+            data: account_data.clone(),
+            secure_data: secure_account_data,
+        })
         .await?;
 
     Ok(Some(client))
@@ -850,18 +859,35 @@ fn save_new_account(
     Ok(())
 }
 
-fn matrix_session_from_account(
-    data: &AccountData,
-    secure_data: &SecureAccountData,
-) -> MatrixSession {
-    MatrixSession {
-        meta: SessionMeta {
-            user_id: data.user_id.clone(),
-            device_id: secure_data.device_id.clone(),
-        },
-        tokens: SessionTokens {
-            access_token: secure_data.access_token.clone(),
-            refresh_token: secure_data.refresh_token.clone(),
-        },
+impl From<Account> for AuthSession {
+    fn from(account: Account) -> Self {
+        if let Some(client_id) = account.secure_data.client_id {
+            OAuthSession {
+                client_id,
+                user: UserSession {
+                    meta: SessionMeta {
+                        user_id: account.data.user_id,
+                        device_id: account.secure_data.device_id,
+                    },
+                    tokens: SessionTokens {
+                        access_token: account.secure_data.access_token,
+                        refresh_token: account.secure_data.refresh_token,
+                    },
+                },
+            }
+            .into()
+        } else {
+            MatrixSession {
+                meta: SessionMeta {
+                    user_id: account.data.user_id,
+                    device_id: account.secure_data.device_id,
+                },
+                tokens: SessionTokens {
+                    access_token: account.secure_data.access_token,
+                    refresh_token: account.secure_data.refresh_token,
+                },
+            }
+            .into()
+        }
     }
 }
