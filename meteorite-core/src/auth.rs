@@ -20,14 +20,15 @@ use crate::{ACCOUNT_PATH, APP_NAME, INITIAL_DEVICE_NAME, utils};
 use age::secrecy::SecretString;
 use keyring_core::Entry;
 use matrix_sdk::{
-    Client, SessionMeta, SessionTokens,
+    Client, RefreshTokenError, SessionChange, SessionMeta, SessionTokens,
     authentication::{matrix::MatrixSession, oauth::ClientId},
     ruma::{
         OwnedDeviceId, OwnedUserId,
-        api::client::session::get_login_types::v3::{IdentityProvider, LoginType},
-        time::{Duration, SystemTime},
+        api::{
+            client::session::get_login_types::v3::{IdentityProvider, LoginType},
+            error::ErrorKind,
+        },
     },
-    store::RoomLoadSettings,
 };
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,6 @@ struct AccountData {
 struct SecureAccountData {
     access_token: String,
     refresh_token: Option<String>,
-    expiration: Option<SystemTime>,
     device_id: OwnedDeviceId,
     // only present when logged in via oauth
     client_id: Option<ClientId>,
@@ -74,21 +74,12 @@ impl SecureAccountData {
     fn new(
         access_token: String,
         refresh_token: Option<String>,
-        expires_in: Option<Duration>,
         device_id: OwnedDeviceId,
         client_id: Option<ClientId>,
     ) -> Self {
-        let expiration = if let Some(expires_in) = expires_in {
-            // overflow impossible (for now)
-            SystemTime::now().checked_add(expires_in)
-        } else {
-            None
-        };
-
         Self {
             access_token,
             refresh_token,
-            expiration,
             device_id,
             client_id,
         }
@@ -229,6 +220,85 @@ pub async fn get_login_types(homeserver: String) -> anyhow::Result<Vec<LoginChoi
     Ok(types)
 }
 
+/// Handles refreshing access tokens.
+///
+/// When an access token is refreshed, the new data (token, refresh token, expiration) will be
+/// updated in the respective file and a new client will be sent.
+///
+/// Errors that should be displayed by the UI will be sent over the provided `Sender`.
+///
+/// This function will return when the current user session should be discarded. In that case the
+/// user should be:
+/// 1. prompted to switch account
+/// 2. brought back to the login screen.
+pub async fn handle_refresh_tokens(client: Client, tx: mpsc::Sender<anyhow::Error>) {
+    let client = client.clone();
+    let mut session_change_stream = client.subscribe_to_session_changes();
+
+    tokio::spawn(async move {
+        while let Ok(change) = session_change_stream.recv().await {
+            if let SessionChange::UnknownToken(data) = change {
+                if data.soft_logout {
+                    let res = client.refresh_access_token().await;
+                    match res {
+                        Ok(_) => {
+                            let tokens = client
+                                .session_tokens()
+                                .expect("Client should be authenticated");
+
+                            match update_account_config(
+                                client
+                                    .user_id()
+                                    .expect("Client should be authenticated")
+                                    .as_str(),
+                                Some(tokens.access_token),
+                                Some(tokens.refresh_token),
+                            ) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    let _ = tx.send(e).await;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            // check for another soft logout/no available refresh token (exchange device id for new access token)
+                            match err {
+                                RefreshTokenError::RefreshTokenRequired => {}
+                                RefreshTokenError::MatrixAuth(http_error)
+                                    if matches!(
+                                        http_error.client_api_error_kind(),
+                                        Some(ErrorKind::UnknownToken(_))
+                                    ) => {}
+                                err => {
+                                    let _ = tx.send(err.into()).await;
+                                    return;
+                                }
+                            }
+
+                            remove_account_config(
+                                client
+                                    .user_id()
+                                    .expect("Client should be authenticated")
+                                    .as_str(),
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    // session destroyed, dont reuse
+                    remove_account_config(
+                        client
+                            .user_id()
+                            .expect("Client should be authenticated")
+                            .as_str(),
+                    );
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// Tries to log the user into the currently active account.
 ///
 /// Also reads the files necessary to login the user (users.toml, encrypted files, keyring entry).
@@ -264,11 +334,6 @@ pub async fn login() -> anyhow::Result<Option<Client>> {
         )
         .build()
         .await?;
-
-    // TODO: check if access token expired
-    // if yes:
-    // -> refresh using refresh token
-    // -> save new token and expiration date
 
     // restore session from the unified account struct
     client
@@ -316,13 +381,13 @@ pub async fn login_username(
         .matrix_auth()
         .login_username(&username, &password)
         .initial_device_display_name(&utils::unwrap_lock(&INITIAL_DEVICE_NAME))
+        .request_refresh_token()
         .await?;
 
     // construct new secure account data from response
     let secure_data = SecureAccountData::new(
         response.access_token,
         response.refresh_token,
-        response.expires_in,
         response.device_id,
         None,
     );
@@ -377,13 +442,13 @@ pub async fn login_sso(
             Ok(())
         })
         .initial_device_display_name(&utils::unwrap_lock(&INITIAL_DEVICE_NAME))
+        .request_refresh_token()
         .await?;
 
     // construct new secure account data from response
     let secure_data = SecureAccountData::new(
         response.access_token,
         response.refresh_token,
-        response.expires_in,
         response.device_id,
         None,
     );
@@ -523,6 +588,51 @@ fn remove_orphaned_accounts() {
     fs::write(&users_path, toml_account_data).ok();
 }
 
+fn update_account_config(
+    user_id: &str,
+    access_token: Option<String>,
+    refresh_token: Option<Option<String>>,
+) -> anyhow::Result<()> {
+    let account_path = utils::unwrap_lock(&ACCOUNT_PATH);
+    let users_path = account_path.join("users.toml");
+
+    let accounts = load_account_list(&users_path)?;
+
+    let id = accounts
+        .accounts
+        .iter()
+        .find(|account| account.user_id == user_id)
+        .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?
+        .id
+        .clone();
+
+    let secure_path = account_path.join(format!("{}.enc", id));
+
+    let encryption_passphrase = load_encryption_passphrase(&id)?;
+
+    let mut secure_data = load_secure_account_data(&secure_path, &encryption_passphrase)?;
+
+    if let Some(access_token) = access_token {
+        secure_data.access_token = access_token;
+    }
+    if let Some(refresh_token) = refresh_token {
+        secure_data.refresh_token = refresh_token;
+    }
+
+    // secure_data struct -> toml
+    let serialized = toml::to_string(&secure_data)?;
+
+    // get recipient from passphrase
+    let recipient = age::scrypt::Recipient::new(SecretString::from(encryption_passphrase));
+
+    // encrypt secure data
+    let encrypted_bytes = age::encrypt(&recipient, serialized.as_bytes())?;
+
+    // write bytes to encrypted file
+    atomic_write(&secure_path, &encrypted_bytes)?;
+
+    Ok(())
+}
 fn atomic_write<C: AsRef<[u8]>>(target: &Path, contents: C) -> anyhow::Result<()> {
     let tmp = target.with_extension("tmp");
     fs::write(&tmp, contents)?;
