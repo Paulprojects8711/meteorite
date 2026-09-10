@@ -587,6 +587,34 @@ fn remove_orphaned_accounts() {
     fs::write(&users_path, toml_account_data).ok();
 }
 
+pub fn set_active_account(user_id: &str, active: bool) -> anyhow::Result<()> {
+    let account_path = utils::unwrap_lock(&ACCOUNT_PATH);
+    let users_path = account_path.join("users.toml");
+
+    let mut accounts = load_account_list(&users_path)?;
+
+    // check if account exists
+    accounts
+        .accounts
+        .iter()
+        .any(|account| account.user_id == user_id)
+        .ok_or_else(|| anyhow::anyhow!("User not found: {}", user_id))?;
+
+    accounts.accounts.iter_mut().for_each(|account| {
+        if account.user_id == user_id {
+            account.active = active;
+        } else {
+            account.active = false;
+        }
+    });
+
+    let toml_account_data = toml::to_string(&accounts)?;
+
+    fs::write(&users_path, toml_account_data)?;
+
+    Ok(())
+}
+
 fn update_account_config(
     user_id: &str,
     access_token: Option<String>,
